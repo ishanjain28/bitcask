@@ -5,9 +5,10 @@ use sha2::digest::HashMarker;
 use std::{
     collections::HashMap,
     env,
+    ffi::OsString,
     fs::{self, read_dir, File},
-    io::{Error as IoError, Write},
-    path::Path,
+    io::{Error as IoError, Read, Write},
+    path::{Path, PathBuf},
     time,
 };
 
@@ -17,10 +18,11 @@ pub struct BitCask {
     keydir: HashMap<Vec<u8>, IndexRecord>,
 }
 
+#[derive(Debug)]
 struct IndexRecord {
-    file_id: String,
-    value_size: u64,
-    value_offset: u64,
+    file_id: PathBuf,
+    value_size: u32,
+    value_offset: usize,
     timestamp: u128,
 }
 
@@ -49,12 +51,10 @@ impl BitCask {
             keydir: HashMap::new(),
         };
 
-        out.read_all_and_seed_keydir();
-
         Ok(out)
     }
 
-    fn read_all_and_seed_keydir(&mut self) {
+    pub fn read_all_and_seed_keydir(&mut self) {
         let entries = fs::read_dir(&self.dir_name).expect("error in reading db directory");
 
         let mut files = vec![];
@@ -80,8 +80,41 @@ impl BitCask {
         }
 
         files.sort_unstable();
-
         println!("{:?}", files);
+
+        for file in files {
+            // TODO:
+            // Read all to memory
+            // Read the whole file 1 record at a time and keep updating keydir
+            let mut file_handle = File::open(&file).expect("error in opening file");
+            // TODO: try_reserve_exact from file metadata
+            // or read in smaller chunks
+            let mut contents = vec![];
+            file_handle
+                .read_to_end(&mut contents)
+                .expect("error in reading file");
+
+            println!("{:?}", contents);
+
+            let mut offset = 0;
+            while offset < contents.len() {
+                let content = &contents[offset..];
+
+                let record = Record::unmarshal(content);
+
+                self.keydir.insert(
+                    record.key.clone(),
+                    IndexRecord {
+                        file_id: file.clone(),
+                        timestamp: record.timestamp,
+                        value_size: record.value_size,
+                        value_offset: record.length() - record.value_size as usize,
+                    },
+                );
+
+                offset += record.length()
+            }
+        }
     }
 
     pub fn close(mut self) {

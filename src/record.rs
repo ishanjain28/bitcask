@@ -63,4 +63,9 @@ impl Record {
             value: value.to_vec(),
         }
     }
+
+    pub fn length(&self) -> usize {
+        // Hash + timestamp + key_size + value_size
+        32 + 16 + 4 + 4 + self.key.len() + self.value.len()
+    }
 }
