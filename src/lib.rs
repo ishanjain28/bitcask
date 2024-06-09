@@ -1,115 +1,105 @@
-use sha2::{Digest, Sha256};
-use std::time;
+mod record;
+pub(crate) use record::*;
+use sha2::digest::HashMarker;
+
 use std::{
+    collections::HashMap,
     env,
-    fs::{self, File},
+    fs::{self, read_dir, File},
+    io::{Error as IoError, Write},
     path::Path,
+    time,
 };
 
 pub struct BitCask {
     dir_name: String,
+    active_file: File,
+    keydir: HashMap<Vec<u8>, IndexRecord>,
 }
 
-#[derive(Debug)]
-struct Record {
+struct IndexRecord {
+    file_id: String,
+    value_size: u64,
+    value_offset: u64,
     timestamp: u128,
-    key_size: u32,
-    value_size: u32,
-    key: Vec<u8>,
-    value: Vec<u8>,
-}
-
-impl Record {
-    fn marshal(self) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(self.timestamp.to_be_bytes());
-        hasher.update(self.key_size.to_be_bytes());
-        hasher.update(self.value_size.to_be_bytes());
-        hasher.update(&self.key);
-        hasher.update(&self.value);
-
-        let result = hasher.finalize();
-
-        let mut output = Vec::with_capacity(56);
-        output.extend(result);
-        output.extend(self.timestamp.to_be_bytes());
-        output.extend(self.key_size.to_be_bytes());
-        output.extend(self.value_size.to_be_bytes());
-        output.reserve((self.key_size + self.value_size) as usize);
-        output.extend(self.key);
-        output.extend(self.value);
-
-        output
-    }
-    fn unmarshal(data: &[u8]) -> Record {
-        let hash = &data[..32];
-        let timestamp = u128::from_be_bytes([
-            data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
-            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
-        ]);
-        let key_size = u32::from_be_bytes([data[48], data[49], data[50], data[51]]);
-        let value_size = u32::from_be_bytes([data[52], data[53], data[54], data[55]]);
-
-        let data = &data[56..];
-        let key = &data[..key_size as usize];
-        let value = &data[key_size as usize..key_size as usize + value_size as usize];
-
-        let mut hasher = Sha256::new();
-        hasher.update(timestamp.to_be_bytes());
-        hasher.update(key_size.to_be_bytes());
-        hasher.update(value_size.to_be_bytes());
-        hasher.update(key);
-        hasher.update(value);
-
-        let result = hasher.finalize();
-
-        assert_eq!(&result[..], hash);
-
-        Record {
-            timestamp,
-            key_size,
-            value_size,
-            key: key.to_vec(),
-            value: value.to_vec(),
-        }
-    }
 }
 
 impl BitCask {
-    pub fn open(dir_name: &str) -> Self {
+    pub fn open(dir_name: &str) -> Result<Self, IoError> {
         // TODO: Assume we open it to read/write
-        // Create a lockfile in this directory, quit if a lockfile exists already
-
         // Create directory if it doesn't exist already
         let cwd = env::current_dir().expect("failed to read current directory");
         let db_path = Path::new(&cwd).join(dir_name);
 
         fs::create_dir_all(dir_name).expect("error in creating directory for database");
 
+        // Create a lockfile in this directory, quit if a lockfile exists already
         let lock_file_path = Path::new(&db_path).join("db.lock");
-        match File::create_new(lock_file_path) {
-            Ok(_) => (),
-            Err(e) => {
-                eprintln!("error in creating lockfile: {}", e);
+        if let Err(e) = File::create_new(lock_file_path) {
+            eprintln!("error in creating lockfile: {}", e);
+        }
+
+        // TODO:
+        // Read all the files and construct in-memory index
+        let active_file_path = Path::new(&db_path).join("000001.cask");
+
+        let mut out = Self {
+            dir_name: dir_name.to_owned(),
+            active_file: File::create(active_file_path)?,
+            keydir: HashMap::new(),
+        };
+
+        out.read_all_and_seed_keydir();
+
+        Ok(out)
+    }
+
+    fn read_all_and_seed_keydir(&mut self) {
+        let entries = fs::read_dir(&self.dir_name).expect("error in reading db directory");
+
+        let mut files = vec![];
+
+        for entry in entries {
+            let entry = entry.expect("error in reading entry");
+            let metadata = entry.metadata().expect("error in reading entry metadata");
+
+            if metadata.is_dir() {
+                continue;
+            }
+
+            if metadata.is_file() {
+                if let Some(e) = entry.path().extension() {
+                    if e != "cask" {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                files.push(entry.path());
             }
         }
 
-        Self {
-            dir_name: dir_name.to_owned(),
-        }
+        files.sort_unstable();
+
+        println!("{:?}", files);
     }
 
-    pub fn close(self) {
+    pub fn close(mut self) {
         let cwd = env::current_dir().expect("failed to read current directory");
-        let db_path = Path::new(&cwd).join(self.dir_name);
+        let db_path = Path::new(&cwd).join(&self.dir_name);
 
         // TODO: Flush all writes
+        self.flush().expect("error in flushing data");
 
         let lock_file_path = Path::new(&db_path).join("db.lock");
         fs::remove_file(lock_file_path).expect("error in removing lockfile");
     }
 
-    pub fn put(&mut self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) {
+    pub fn put(
+        &mut self,
+        key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<(), IoError> {
         let timestamp = time::UNIX_EPOCH.elapsed().unwrap().as_nanos();
         let key = key.into();
         let value = value.into();
@@ -122,9 +112,22 @@ impl BitCask {
             value,
         };
 
-        let result = record.marshal();
-        let record = Record::unmarshal(&result);
+        let data = record.marshal();
 
-        println!("{:?}", record);
+        self.write(&data)
+    }
+}
+
+impl BitCask {
+    fn write(&mut self, data: &[u8]) -> Result<(), IoError> {
+        self.active_file.write_all(data)?;
+
+        self.flush()?;
+
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.active_file.flush()
     }
 }
