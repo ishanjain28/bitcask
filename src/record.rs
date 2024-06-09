@@ -1,7 +1,9 @@
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
 use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
-pub(crate) struct Record {
+pub struct Record {
     pub timestamp: u128,
     pub key_size: u32,
     pub value_size: u32,
@@ -65,7 +67,19 @@ impl Record {
     }
 
     pub fn length(&self) -> usize {
-        // Hash + timestamp + key_size + value_size
+        // Hash + timestamp + key_size + value_size + key + value
         32 + 16 + 4 + 4 + self.key.len() + self.value.len()
+    }
+}
+
+impl Display for Record {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_fmt(format_args!(
+            "key = {} value = {} timestamp = {}",
+            // TODO: Keys may not always be encoded in utf8!
+            String::from_utf8_lossy(&self.key),
+            String::from_utf8_lossy(&self.value),
+            self.timestamp,
+        ))
     }
 }

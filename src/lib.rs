@@ -7,7 +7,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, read_dir, File},
-    io::{Error as IoError, Read, Write},
+    io::{Error as IoError, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     time,
 };
@@ -45,7 +45,7 @@ impl BitCask {
         // Read all the files and construct in-memory index
         let active_file_path = Path::new(&db_path).join("000001.cask");
 
-        let mut out = Self {
+        let out = Self {
             dir_name: dir_name.to_owned(),
             active_file: File::create(active_file_path)?,
             keydir: HashMap::new(),
@@ -94,8 +94,6 @@ impl BitCask {
                 .read_to_end(&mut contents)
                 .expect("error in reading file");
 
-            println!("{:?}", contents);
-
             let mut offset = 0;
             while offset < contents.len() {
                 let content = &contents[offset..];
@@ -108,7 +106,7 @@ impl BitCask {
                         file_id: file.clone(),
                         timestamp: record.timestamp,
                         value_size: record.value_size,
-                        value_offset: record.length() - record.value_size as usize,
+                        value_offset: offset + record.length() - record.value_size as usize,
                     },
                 );
 
@@ -128,6 +126,34 @@ impl BitCask {
         fs::remove_file(lock_file_path).expect("error in removing lockfile");
     }
 
+    pub fn get(&mut self, key: impl Into<Vec<u8>>) -> Result<Record, String> {
+        let key = key.into();
+
+        if let Some(index_record) = self.keydir.get(&key) {
+            let mut file_handle = File::open(&index_record.file_id).expect("error in opening file");
+            // TODO: try_reserve_exact from file metadata
+            // or read in smaller chunks
+            let mut contents = vec![];
+            file_handle
+                .read_to_end(&mut contents)
+                .expect("error in reading file");
+
+            let value = &contents[index_record.value_offset
+                ..index_record.value_offset + index_record.value_size as usize];
+
+            let record = Record {
+                timestamp: index_record.timestamp,
+                key_size: key.len() as u32,
+                value_size: index_record.value_size,
+                key: key.clone(),
+                value: value.to_vec(),
+            };
+
+            Ok(record)
+        } else {
+            Err("could not find key".to_string())
+        }
+    }
     pub fn put(
         &mut self,
         key: impl Into<Vec<u8>>,
