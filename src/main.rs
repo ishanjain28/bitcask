@@ -11,7 +11,6 @@ fn main() {
         .expect("error in writing record");
     cask.put("name2", "ishan wjain2")
         .expect("error in writing record");
-    cask.read_all_and_seed_keydir();
 
     let resp = cask.get("name2").expect("error in getting key");
     println!("{}", resp);

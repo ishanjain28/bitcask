@@ -1,26 +1,29 @@
 mod record;
 pub(crate) use record::*;
-use sha2::digest::HashMarker;
 
 use std::{
     collections::HashMap,
     env,
-    ffi::OsString,
-    fs::{self, read_dir, File},
-    io::{Error as IoError, ErrorKind, Read, Write},
+    fs::{self, File},
+    io::{Error as IoError, Read, Write},
     path::{Path, PathBuf},
     time,
 };
 
 pub struct BitCask {
     dir_name: String,
-    active_file: File,
+    active_file: ActiveFile,
     keydir: HashMap<Vec<u8>, IndexRecord>,
+}
+
+struct ActiveFile {
+    file_id: u32,
+    handle: File,
 }
 
 #[derive(Debug)]
 struct IndexRecord {
-    file_id: PathBuf,
+    file_id: u32,
     value_size: u32,
     value_offset: usize,
     timestamp: u128,
@@ -45,50 +48,36 @@ impl BitCask {
         // Read all the files and construct in-memory index
         let active_file_path = Path::new(&db_path).join("000001.cask");
 
-        let out = Self {
+        let mut out = Self {
             dir_name: dir_name.to_owned(),
-            active_file: File::create(active_file_path)?,
+            active_file: ActiveFile {
+                handle: File::create(active_file_path)?,
+                file_id: 0,
+            },
             keydir: HashMap::new(),
         };
+
+        out.init();
 
         Ok(out)
     }
 
-    pub fn read_all_and_seed_keydir(&mut self) {
-        let entries = fs::read_dir(&self.dir_name).expect("error in reading db directory");
+    fn derive_filepath_from_fileid(&self, file_id: u32) -> PathBuf {
+        Path::new(&self.dir_name).join(format!("{:#06}.cask", file_id))
+    }
 
-        let mut files = vec![];
+    pub fn init(&mut self) {
+        let mut file_id = 1;
 
-        for entry in entries {
-            let entry = entry.expect("error in reading entry");
-            let metadata = entry.metadata().expect("error in reading entry metadata");
-
-            if metadata.is_dir() {
-                continue;
-            }
-
-            if metadata.is_file() {
-                if let Some(e) = entry.path().extension() {
-                    if e != "cask" {
-                        continue;
-                    }
-                } else {
-                    continue;
+        loop {
+            let filename = self.derive_filepath_from_fileid(file_id);
+            let mut file_handle = match File::open(&filename) {
+                Ok(v) => v,
+                Err(_) => {
+                    // TODO: Add a debug logger marking the end here
+                    break;
                 }
-                files.push(entry.path());
-            }
-        }
-
-        files.sort_unstable();
-        println!("{:?}", files);
-
-        for file in files {
-            // TODO:
-            // Read all to memory
-            // Read the whole file 1 record at a time and keep updating keydir
-            let mut file_handle = File::open(&file).expect("error in opening file");
-            // TODO: try_reserve_exact from file metadata
-            // or read in smaller chunks
+            };
             let mut contents = vec![];
             file_handle
                 .read_to_end(&mut contents)
@@ -103,7 +92,7 @@ impl BitCask {
                 self.keydir.insert(
                     record.key.clone(),
                     IndexRecord {
-                        file_id: file.clone(),
+                        file_id,
                         timestamp: record.timestamp,
                         value_size: record.value_size,
                         value_offset: offset + record.length() - record.value_size as usize,
@@ -112,7 +101,13 @@ impl BitCask {
 
                 offset += record.length()
             }
+            file_id += 1;
         }
+
+        self.active_file.file_id = file_id;
+        self.active_file.handle =
+            File::create(Path::new(&self.dir_name).join(format!("{:#06}.cask", file_id)))
+                .expect("error in creating new segment");
     }
 
     pub fn close(mut self) {
@@ -130,7 +125,10 @@ impl BitCask {
         let key = key.into();
 
         if let Some(index_record) = self.keydir.get(&key) {
-            let mut file_handle = File::open(&index_record.file_id).expect("error in opening file");
+            let mut file_handle =
+                File::open(&self.derive_filepath_from_fileid(index_record.file_id))
+                    .expect("error in opening file");
+
             // TODO: try_reserve_exact from file metadata
             // or read in smaller chunks
             let mut contents = vec![];
@@ -173,13 +171,25 @@ impl BitCask {
 
         let data = record.marshal();
 
-        self.write(&data)
+        // TODO: Update keydir on writes
+        // TODO: Create and use a new segment if it's over the size limit
+        self.write(&data)?;
+
+        self.keydir.insert(
+            key.clone(),
+            IndexRecord {
+                file_id: self.active_file.file_id,
+                timestamp: timestamp,
+            },
+        );
+
+        Ok(())
     }
 }
 
 impl BitCask {
     fn write(&mut self, data: &[u8]) -> Result<(), IoError> {
-        self.active_file.write_all(data)?;
+        self.active_file.handle.write_all(data)?;
 
         self.flush()?;
 
@@ -187,6 +197,6 @@ impl BitCask {
     }
 
     fn flush(&mut self) -> Result<(), IoError> {
-        self.active_file.flush()
+        self.active_file.handle.flush()
     }
 }
