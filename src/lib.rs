@@ -174,15 +174,10 @@ impl BitCask {
 
         let data = record.clone().marshal();
 
-        // if self
-        //     .active_file
-        //     .unwrap()
-        //     .size()
-        //     .unwrap_or(SEGMENT_SIZE_LIMIT)
-        //     >= SEGMENT_SIZE_LIMIT
-        // {
-        //     self.create_and_use_segment(self.active_file_id + 1)?;
-        // }
+        if self.active_file.as_mut().unwrap().metadata()?.size() >= self.options.segment_size_limit
+        {
+            self.create_and_use_segment(self.active_file_id + 1)?;
+        }
 
         // TODO: Update keydir on writes
         // TODO: Create and use a new segment if it's over the size limit
