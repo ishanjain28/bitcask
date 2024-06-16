@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use sha2::{Digest, Sha256};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Record {
     pub timestamp: u128,
     pub key_size: u32,
@@ -66,9 +66,9 @@ impl Record {
         }
     }
 
-    pub fn length(&self) -> usize {
+    pub fn length(&self) -> u64 {
         // Hash + timestamp + key_size + value_size + key + value
-        32 + 16 + 4 + 4 + self.key.len() + self.value.len()
+        32 + 16 + 4 + 4 + self.key.len() as u64 + self.value.len() as u64
     }
 }
 
